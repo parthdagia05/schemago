@@ -34,6 +34,15 @@ plain SQL, Postgres). schemago's wedge is the safe defaults it never shipped:
 | `apply`   | Run the pending migrations, safely and one at a time.              |
 | `dry-run` | Go through the motions without touching the real database.         |
 
+## Migration File Format & Directory Convention
+
+`schemago` reads migration scripts from `./migrations` by default. Migrations use plain `.sql` files named `<version>_<description>.sql`:
+
+- `0001_create_users_table.sql`
+- `0002_add_email_index.sql`
+
+Migrations are executed in strict numerical version order. For details on gap tolerance and duplicate version validation, see [docs/migration_convention.md](docs/migration_convention.md).
+
 ## Status
 
 Early development. Postgres first; MySQL and more later. See the issue tracker for the
@@ -42,3 +51,4 @@ build plan.
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
