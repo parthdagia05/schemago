@@ -52,6 +52,11 @@ Migrations are executed in strict numerical version order. For details on gap to
 
 For architectural details on driver selection and connection handling, see [docs/driver_choice.md](docs/driver_choice.md).
 
+## Schema History Table
+
+`schemago` tracks applied migrations inside the target database using the `schemago_migrations` table (version, name, applied_at, checksum). Checksums ensure already-applied migration files cannot be secretly modified on disk.
+
+For schema specifications and integrity validation rules, see [docs/schema_history.md](docs/schema_history.md).
 
 ## Status
 
