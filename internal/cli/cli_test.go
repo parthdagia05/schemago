@@ -54,6 +54,24 @@ func TestParseGlobalFlags(t *testing.T) {
 	}
 }
 
+func TestParseFlags(t *testing.T) {
+	args := []string{"--database-url", "postgres://localhost/test", "--dir", "my_migrations", "--table", "custom_history", "status"}
+	gotURL, gotDir, gotTable, gotRest := ParseFlags(args)
+
+	if gotURL != "postgres://localhost/test" {
+		t.Errorf("gotURL = %q, want postgres://localhost/test", gotURL)
+	}
+	if gotDir != "my_migrations" {
+		t.Errorf("gotDir = %q, want my_migrations", gotDir)
+	}
+	if gotTable != "custom_history" {
+		t.Errorf("gotTable = %q, want custom_history", gotTable)
+	}
+	if len(gotRest) != 1 || gotRest[0] != "status" {
+		t.Errorf("gotRest = %v, want [status]", gotRest)
+	}
+}
+
 func TestRunWithWritersHelp(t *testing.T) {
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
