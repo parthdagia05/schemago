@@ -43,6 +43,16 @@ plain SQL, Postgres). schemago's wedge is the safe defaults it never shipped:
 
 Migrations are executed in strict numerical version order. For details on gap tolerance and duplicate version validation, see [docs/migration_convention.md](docs/migration_convention.md).
 
+## Configuration & Database Connection
+
+`schemago` connects to PostgreSQL using `pgx` (`github.com/jackc/pgx/v5`). Connection strings are resolved in the following priority order:
+
+1. `--database-url` CLI flag (e.g. `schemago apply --database-url="postgres://user:pass@localhost:5432/dbname"`)
+2. `DATABASE_URL` environment variable
+
+For architectural details on driver selection and connection handling, see [docs/driver_choice.md](docs/driver_choice.md).
+
+
 ## Status
 
 Early development. Postgres first; MySQL and more later. See the issue tracker for the
