@@ -32,6 +32,12 @@ func Discover(dirPath string) ([]*MigrationFile, error) {
 			return nil, fmt.Errorf("invalid migration file in directory %q: %w", dirPath, err)
 		}
 
+		checksum, err := ComputeFileChecksum(filePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to compute checksum for migration file %q: %w", filePath, err)
+		}
+		migrationFile.Checksum = checksum
+
 		files = append(files, migrationFile)
 	}
 

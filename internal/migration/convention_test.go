@@ -2,6 +2,8 @@ package migration
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -123,4 +125,41 @@ func TestValidateAndSort(t *testing.T) {
 			t.Fatalf("expected ErrDuplicateVersion, got %v", err)
 		}
 	})
+}
+
+func TestComputeChecksum(t *testing.T) {
+	content := []byte("CREATE TABLE users (id SERIAL PRIMARY KEY);")
+	hash1 := ComputeChecksum(content)
+	hash2 := ComputeChecksum(content)
+
+	if hash1 == "" {
+		t.Fatal("expected non-empty hash string")
+	}
+	if hash1 != hash2 {
+		t.Errorf("expected deterministic hash output, got %s and %s", hash1, hash2)
+	}
+	if len(hash1) != 64 {
+		t.Errorf("expected SHA-256 hex length 64, got %d", len(hash1))
+	}
+}
+
+func TestComputeFileChecksum(t *testing.T) {
+	tempFile := filepath.Join(t.TempDir(), "test.sql")
+	content := []byte("-- test migration sql")
+	if err := os.WriteFile(tempFile, content, 0644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
+
+	checksum, err := ComputeFileChecksum(tempFile)
+	if err != nil {
+		t.Fatalf("ComputeFileChecksum error: %v", err)
+	}
+	if checksum != ComputeChecksum(content) {
+		t.Errorf("checksum mismatch: got %s, want %s", checksum, ComputeChecksum(content))
+	}
+
+	_, err = ComputeFileChecksum(filepath.Join(t.TempDir(), "nonexistent.sql"))
+	if err == nil {
+		t.Error("expected error for non-existent file, got nil")
+	}
 }

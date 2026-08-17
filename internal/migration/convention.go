@@ -2,8 +2,11 @@
 package migration
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -37,6 +40,7 @@ type MigrationFile struct {
 	Description string
 	Filename    string
 	Path        string
+	Checksum    string
 }
 
 // ParseFilename parses a migration filename into a MigrationFile metadata struct.
@@ -95,4 +99,19 @@ func ValidateAndSort(files []*MigrationFile) ([]*MigrationFile, error) {
 	}
 
 	return sorted, nil
+}
+
+// ComputeChecksum calculates and returns the hex-encoded SHA-256 hash of the given content.
+func ComputeChecksum(data []byte) string {
+	hash := sha256.Sum256(data)
+	return hex.EncodeToString(hash[:])
+}
+
+// ComputeFileChecksum reads the file at path and returns its hex-encoded SHA-256 hash.
+func ComputeFileChecksum(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to read file for checksum: %w", err)
+	}
+	return ComputeChecksum(data), nil
 }
