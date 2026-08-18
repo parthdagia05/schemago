@@ -55,8 +55,8 @@ func TestParseGlobalFlags(t *testing.T) {
 }
 
 func TestParseFlags(t *testing.T) {
-	args := []string{"--database-url", "postgres://localhost/test", "--dir", "my_migrations", "--table", "custom_history", "status"}
-	gotURL, gotDir, gotTable, gotRest := ParseFlags(args)
+	args := []string{"--database-url", "postgres://localhost/test", "--dir", "my_migrations", "--table", "custom_history", "--sql", "plan"}
+	gotURL, gotDir, gotTable, gotShowSQL, gotRest := ParseFlags(args)
 
 	if gotURL != "postgres://localhost/test" {
 		t.Errorf("gotURL = %q, want postgres://localhost/test", gotURL)
@@ -67,8 +67,11 @@ func TestParseFlags(t *testing.T) {
 	if gotTable != "custom_history" {
 		t.Errorf("gotTable = %q, want custom_history", gotTable)
 	}
-	if len(gotRest) != 1 || gotRest[0] != "status" {
-		t.Errorf("gotRest = %v, want [status]", gotRest)
+	if !gotShowSQL {
+		t.Errorf("gotShowSQL = false, want true")
+	}
+	if len(gotRest) != 1 || gotRest[0] != "plan" {
+		t.Errorf("gotRest = %v, want [plan]", gotRest)
 	}
 }
 
@@ -115,6 +118,23 @@ func TestRunWithWritersMissingDBConfig(t *testing.T) {
 	}
 }
 
+func TestRunWithWritersPlanMissingDBConfig(t *testing.T) {
+	origEnv := os.Getenv(config.EnvDatabaseURL)
+	os.Setenv(config.EnvDatabaseURL, "")
+	defer os.Setenv(config.EnvDatabaseURL, origEnv)
+
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+
+	code := RunWithWriters([]string{"plan"}, stdout, stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1 when missing database URL, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "missing database connection string") {
+		t.Errorf("expected missing database connection string error in stderr, got: %s", stderr.String())
+	}
+}
+
 func TestRunWithWritersUnreachableDB(t *testing.T) {
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
@@ -128,3 +148,18 @@ func TestRunWithWritersUnreachableDB(t *testing.T) {
 		t.Errorf("expected schemago status error in stderr, got: %s", stderr.String())
 	}
 }
+
+func TestRunWithWritersPlanUnreachableDB(t *testing.T) {
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+
+	invalidURL := "postgres://invalid:invalid@127.0.0.1:59999/testdb?sslmode=disable"
+	code := RunWithWriters([]string{"--database-url", invalidURL, "plan"}, stdout, stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1 when database unreachable, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "schemago plan error:") {
+		t.Errorf("expected schemago plan error in stderr, got: %s", stderr.String())
+	}
+}
+
