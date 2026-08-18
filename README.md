@@ -25,6 +25,41 @@ plain SQL, Postgres). schemago's wedge is the safe defaults it never shipped:
 3. **Simple by default.** One static binary, plain `.sql` files. No JVM (unlike Flyway
    / Liquibase), no DSL to learn (unlike Atlas), no paid tier gating the safety features.
 
+## Installation
+
+`schemago` is distributed as a single static binary with zero runtime dependencies (no `libc` / dynamic library requirement).
+
+### Download Pre-built Binary (Recommended)
+
+Download the latest binary for your operating system and architecture from [GitHub Releases](https://github.com/parthdagia05/schemago/releases):
+
+**Linux (amd64 / arm64)**:
+```bash
+curl -sSL https://github.com/parthdagia05/schemago/releases/latest/download/schemago_Linux_amd64.tar.gz | tar -xz -C /usr/local/bin schemago
+```
+
+**macOS (Apple Silicon / Intel)**:
+```bash
+curl -sSL https://github.com/parthdagia05/schemago/releases/latest/download/schemago_Darwin_arm64.tar.gz | tar -xz -C /usr/local/bin schemago
+```
+
+**Windows (amd64 / arm64)**:
+Download the latest `schemago_Windows_amd64.zip` asset from the release page, unzip, and place `schemago.exe` in your system `PATH`.
+
+### Build From Source
+
+```bash
+go install github.com/parthdagia05/schemago/cmd/schemago@latest
+```
+
+Or clone and build a static binary manually:
+
+```bash
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o schemago ./cmd/schemago
+```
+
+For release pipelines, cross-compilation matrix, and static binary verification instructions, see [docs/single_static_binary_release.md](docs/single_static_binary_release.md).
+
 ## Commands (planned v1)
 
 | Command   | What it does                                                       |
@@ -33,6 +68,7 @@ plain SQL, Postgres). schemago's wedge is the safe defaults it never shipped:
 | `plan`    | Preview exactly what's about to change before anything happens.    |
 | `apply`   | Run the pending migrations, safely and one at a time.              |
 | `dry-run` | Go through the motions without touching the real database.         |
+| `version` | Display the current schemago release version.                      |
 
 ## Migration File Format & Directory Convention
 

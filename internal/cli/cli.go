@@ -21,6 +21,8 @@ import (
 	"github.com/parthdagia05/schemago/internal/status"
 )
 
+var Version = "dev"
+
 const (
 	// ExitSuccess indicates successful execution with no errors or unapplied/drifted migrations.
 	ExitSuccess = 0
@@ -42,6 +44,7 @@ Commands:
   plan      Preview the changes that apply would make
   apply     Apply pending migrations, one at a time, in a transaction
   dry-run   Go through apply without touching the database
+  version   Show schemago version
   help      Show this help
 
 Global Flags:
@@ -51,6 +54,7 @@ Global Flags:
   --sql                   Show full SQL statements in plan output
   --no-lock               Disable advisory locking during migration apply
   --json                  Output status, plan, apply, dry-run, and errors as structured JSON
+  --version               Show schemago version
 
 Exit Codes:
   0    Success
@@ -181,6 +185,17 @@ func RunWithWriters(args []string, stdout, stderr io.Writer) int {
 		return handleApply(stdout, stderr, flagDBURL, flagDir, flagTable, flagNoLock, flagJSON)
 	case "dry-run":
 		return handleDryRun(stdout, stderr, flagDBURL, flagDir, flagTable, flagNoLock, flagJSON)
+	case "version", "--version", "-version":
+		if flagJSON {
+			resp := map[string]string{
+				"version": Version,
+			}
+			data, _ := json.MarshalIndent(resp, "", "  ")
+			fmt.Fprintln(stdout, string(data))
+		} else {
+			fmt.Fprintf(stdout, "schemago version %s\n", Version)
+		}
+		return ExitSuccess
 	case "help", "-h", "--help":
 		if flagJSON {
 			resp := map[string]string{
