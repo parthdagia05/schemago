@@ -438,3 +438,49 @@ func TestJSONOutputFlagsAndErrors(t *testing.T) {
 		}
 	})
 }
+
+func TestVersionCommand(t *testing.T) {
+	t.Run("plain version output", func(t *testing.T) {
+		stdout := &bytes.Buffer{}
+		stderr := &bytes.Buffer{}
+
+		code := RunWithWriters([]string{"version"}, stdout, stderr)
+		if code != ExitSuccess {
+			t.Errorf("expected exit code 0 for version, got %d", code)
+		}
+		if !strings.Contains(stdout.String(), "schemago version "+Version) {
+			t.Errorf("expected stdout to contain schemago version %s, got: %s", Version, stdout.String())
+		}
+	})
+
+	t.Run("--version flag", func(t *testing.T) {
+		stdout := &bytes.Buffer{}
+		stderr := &bytes.Buffer{}
+
+		code := RunWithWriters([]string{"--version"}, stdout, stderr)
+		if code != ExitSuccess {
+			t.Errorf("expected exit code 0 for --version, got %d", code)
+		}
+		if !strings.Contains(stdout.String(), "schemago version "+Version) {
+			t.Errorf("expected stdout to contain schemago version %s, got: %s", Version, stdout.String())
+		}
+	})
+
+	t.Run("JSON version output", func(t *testing.T) {
+		stdout := &bytes.Buffer{}
+		stderr := &bytes.Buffer{}
+
+		code := RunWithWriters([]string{"version", "--json"}, stdout, stderr)
+		if code != ExitSuccess {
+			t.Errorf("expected exit code 0 for version --json, got %d", code)
+		}
+		var resp map[string]string
+		if err := json.Unmarshal(stdout.Bytes(), &resp); err != nil {
+			t.Fatalf("expected valid JSON in stdout for version --json, got error %v; output:\n%s", err, stdout.String())
+		}
+		if resp["version"] != Version {
+			t.Errorf("expected version field %q, got %q", Version, resp["version"])
+		}
+	})
+}
+
