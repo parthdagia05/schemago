@@ -266,4 +266,104 @@ func TestRunWithWritersApply_LockReleasedOnFailure(t *testing.T) {
 	}
 }
 
+func TestRunWithWritersDryRunMissingDBConfig(t *testing.T) {
+	origEnv := os.Getenv(config.EnvDatabaseURL)
+	os.Setenv(config.EnvDatabaseURL, "")
+	defer os.Setenv(config.EnvDatabaseURL, origEnv)
+
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+
+	code := RunWithWriters([]string{"dry-run"}, stdout, stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1 when missing database URL, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "missing database connection string") {
+		t.Errorf("expected missing database connection string error in stderr, got: %s", stderr.String())
+	}
+}
+
+func TestRunWithWritersDryRunUnreachableDB(t *testing.T) {
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+
+	invalidURL := "postgres://invalid:invalid@127.0.0.1:59999/testdb?sslmode=disable"
+	code := RunWithWriters([]string{"--database-url", invalidURL, "dry-run"}, stdout, stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1 when database unreachable, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "schemago dry-run error:") {
+		t.Errorf("expected schemago dry-run error in stderr, got: %s", stderr.String())
+	}
+}
+
+func TestRunWithWritersDryRun_SuccessLeavesDBUnchanged(t *testing.T) {
+	tempDir := t.TempDir()
+	dbDir := t.TempDir()
+	dbPath := "sqlite:" + filepath.Join(dbDir, "test_dryrun.db")
+
+	m1 := filepath.Join(tempDir, "0001_create_users.sql")
+	_ = os.WriteFile(m1, []byte("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT);"), 0644)
+	m2 := filepath.Join(tempDir, "0002_create_posts.sql")
+	_ = os.WriteFile(m2, []byte("CREATE TABLE posts (id INTEGER PRIMARY KEY, title TEXT);"), 0644)
+
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+
+	code := RunWithWriters([]string{"--database-url", dbPath, "--dir", tempDir, "dry-run"}, stdout, stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0 for dry-run, got %d (err: %s)", code, stderr.String())
+	}
+
+	outStr := stdout.String()
+	if !strings.Contains(outStr, "[DRY-RUN] Simulating 2 pending migrations") ||
+		!strings.Contains(outStr, "✓ 0001_create_users.sql") ||
+		!strings.Contains(outStr, "✓ 0002_create_posts.sql") ||
+		!strings.Contains(outStr, "[DRY-RUN] Dry-run completed successfully. 2 migrations validated (0 changes committed).") {
+		t.Errorf("unexpected stdout format:\n%s", outStr)
+	}
+
+	// Verify real apply after dry-run succeeds and applies the migrations cleanly
+	stdoutApply := &bytes.Buffer{}
+	stderrApply := &bytes.Buffer{}
+	codeApply := RunWithWriters([]string{"--database-url", dbPath, "--dir", tempDir, "apply"}, stdoutApply, stderrApply)
+	if codeApply != 0 {
+		t.Fatalf("expected apply after dry-run to succeed, got %d (err: %s)", codeApply, stderrApply.String())
+	}
+	if !strings.Contains(stdoutApply.String(), "Successfully applied 2 migrations.") {
+		t.Errorf("unexpected apply stdout after dry-run:\n%s", stdoutApply.String())
+	}
+}
+
+func TestRunWithWritersDryRun_CatchesSQLError(t *testing.T) {
+	tempDir := t.TempDir()
+	dbDir := t.TempDir()
+	dbPath := "sqlite:" + filepath.Join(dbDir, "test_dryrun_err.db")
+
+	m1 := filepath.Join(tempDir, "0001_create_users.sql")
+	_ = os.WriteFile(m1, []byte("CREATE TABLE users (id INTEGER PRIMARY KEY);"), 0644)
+	m2 := filepath.Join(tempDir, "0002_failing.sql")
+	_ = os.WriteFile(m2, []byte("INVALID SQL SYNTAX HERE;"), 0644)
+
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+
+	code := RunWithWriters([]string{"--database-url", dbPath, "--dir", tempDir, "dry-run"}, stdout, stderr)
+	if code != 1 {
+		t.Fatalf("expected exit code 1 for dry-run with SQL error, got %d", code)
+	}
+
+	outStr := stdout.String()
+	if !strings.Contains(outStr, "[DRY-RUN]") ||
+		!strings.Contains(outStr, "✗ 0002_failing.sql FAILED") ||
+		!strings.Contains(outStr, "No changes were made to the database.") {
+		t.Errorf("unexpected dry-run failure output:\n%s", outStr)
+	}
+
+	if !strings.Contains(stderr.String(), "schemago dry-run error:") {
+		t.Errorf("expected schemago dry-run error in stderr, got: %s", stderr.String())
+	}
+}
+
+
 

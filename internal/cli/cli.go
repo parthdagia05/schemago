@@ -12,6 +12,7 @@ import (
 	"github.com/parthdagia05/schemago/internal/apply"
 	"github.com/parthdagia05/schemago/internal/config"
 	"github.com/parthdagia05/schemago/internal/db"
+	"github.com/parthdagia05/schemago/internal/dryrun"
 	"github.com/parthdagia05/schemago/internal/history"
 	"github.com/parthdagia05/schemago/internal/lock"
 	"github.com/parthdagia05/schemago/internal/migration"
@@ -144,7 +145,7 @@ func RunWithWriters(args []string, stdout, stderr io.Writer) int {
 	case "apply":
 		return handleApply(stdout, stderr, flagDBURL, flagDir, flagTable, flagNoLock)
 	case "dry-run":
-		return handleDatabaseCommand(stdout, stderr, "dry-run", flagDBURL)
+		return handleDryRun(stdout, stderr, flagDBURL, flagDir, flagTable, flagNoLock)
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usage)
 		return 0
@@ -324,6 +325,82 @@ func handleApply(stdout, stderr io.Writer, flagDBURL, flagDir, flagTable string,
 
 	if applyErr != nil {
 		fmt.Fprintf(stderr, "schemago apply error: %v\n", applyErr)
+		return 1
+	}
+
+	return 0
+}
+
+func handleDryRun(stdout, stderr io.Writer, flagDBURL, flagDir, flagTable string, noLock bool) int {
+	cfg, err := config.NewWithOpts(flagDBURL, flagDir, flagTable, config.DefaultTimeout)
+	if err != nil {
+		fmt.Fprintf(stderr, "schemago dry-run error: %v\n", err)
+		return 1
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
+	defer cancel()
+
+	dbConn, err := db.ConnectAndPing(ctx, cfg.DatabaseURL, cfg.Timeout)
+	if err != nil {
+		fmt.Fprintf(stderr, "schemago dry-run error: %v\n", err)
+		return 1
+	}
+	defer dbConn.Close()
+
+	conn, err := dbConn.Conn(ctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "schemago dry-run error: %v\n", err)
+		return 1
+	}
+	defer conn.Close()
+
+	if !noLock {
+		l := lock.New(conn, lock.GenerateLockID(cfg.TableName))
+		if err := l.Lock(ctx); err != nil {
+			fmt.Fprintf(stderr, "schemago dry-run error: %v\n", err)
+			return 1
+		}
+		defer func() {
+			_ = l.Unlock(context.Background())
+		}()
+	}
+
+	if err := history.EnsureTable(ctx, conn, cfg.TableName); err != nil {
+		fmt.Fprintf(stderr, "schemago dry-run error: %v\n", err)
+		return 1
+	}
+
+	applied, err := history.GetAppliedMigrations(ctx, conn, cfg.TableName)
+	if err != nil {
+		fmt.Fprintf(stderr, "schemago dry-run error: %v\n", err)
+		return 1
+	}
+
+	discovered, err := migration.Discover(cfg.MigrationsDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			discovered = nil
+		} else {
+			fmt.Fprintf(stderr, "schemago dry-run error: %v\n", err)
+			return 1
+		}
+	}
+
+	pending, err := history.ComputePending(discovered, applied)
+	if err != nil {
+		fmt.Fprintf(stderr, "schemago dry-run error: %v\n", err)
+		return 1
+	}
+
+	res, dryRunErr := dryrun.DryRun(ctx, conn, cfg.TableName, pending)
+	if formatErr := dryrun.FormatResult(stdout, res); formatErr != nil {
+		fmt.Fprintf(stderr, "schemago dry-run error: %v\n", formatErr)
+		return 1
+	}
+
+	if dryRunErr != nil {
+		fmt.Fprintf(stderr, "schemago dry-run error: %v\n", dryRunErr)
 		return 1
 	}
 
