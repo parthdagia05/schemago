@@ -1,5 +1,7 @@
 # schemago
 
+[![CI](https://github.com/parthdagia05/schemago/actions/workflows/ci.yml/badge.svg)](https://github.com/parthdagia05/schemago/actions/workflows/ci.yml)
+
 **A standalone database migration runner.** One tiny binary you run in your deploy
 pipeline to apply schema changes *before* your app starts: safely, visibly, and the
 same way every time. Not tied to any framework or language.
