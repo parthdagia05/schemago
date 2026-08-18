@@ -53,6 +53,10 @@ func DryRun(ctx context.Context, db apply.TxBeginnerContext, tableName string, p
 		_ = tx.Rollback()
 	}()
 
+	if err := history.EnsureTable(ctx, tx, tableName); err != nil {
+		return nil, fmt.Errorf("failed to ensure history table in dry-run transaction: %w", err)
+	}
+
 	for _, file := range pending {
 		if file == nil {
 			continue

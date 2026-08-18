@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/parthdagia05/schemago/internal/migration"
@@ -116,6 +117,9 @@ func GetAppliedMigrations(ctx context.Context, db Execer, tableName string) ([]*
 
 	rows, err := db.QueryContext(ctx, query)
 	if err != nil {
+		if isTableNotExistError(err) {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("failed to query applied migrations from %q: %w", tableName, err)
 	}
 	defer rows.Close()
@@ -198,4 +202,15 @@ func ComputePending(discovered []*migration.MigrationFile, applied []*AppliedMig
 	}
 
 	return pending, nil
+}
+
+func isTableNotExistError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "does not exist") ||
+		strings.Contains(msg, "no such table") ||
+		strings.Contains(msg, "undefined_table") ||
+		strings.Contains(msg, "42p01")
 }
