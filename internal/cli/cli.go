@@ -13,6 +13,7 @@ import (
 	"github.com/parthdagia05/schemago/internal/db"
 	"github.com/parthdagia05/schemago/internal/history"
 	"github.com/parthdagia05/schemago/internal/migration"
+	"github.com/parthdagia05/schemago/internal/plan"
 	"github.com/parthdagia05/schemago/internal/status"
 )
 
@@ -32,13 +33,14 @@ Global Flags:
   --database-url string   PostgreSQL connection string (overrides DATABASE_URL env var)
   --dir string            Directory containing migration files (default "migrations")
   --table string          Schema history table name (default "schemago_migrations")
+  --sql                   Show full SQL statements in plan output
 
 Run "schemago <command> --help" for details on a command.
 `
 
-// ParseFlags extracts global flags such as --database-url, --dir, and --table from command arguments,
+// ParseFlags extracts global and command flags such as --database-url, --dir, --table, and --sql from command arguments,
 // preserving positional subcommand arguments.
-func ParseFlags(args []string) (dbURL, dir, table string, rest []string) {
+func ParseFlags(args []string) (dbURL, dir, table string, showSQL bool, rest []string) {
 	rest = make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -77,16 +79,19 @@ func ParseFlags(args []string) (dbURL, dir, table string, rest []string) {
 		case strings.HasPrefix(arg, "-table="):
 			table = strings.TrimPrefix(arg, "-table=")
 
+		case arg == "--sql" || arg == "-sql" || arg == "--show-sql" || arg == "--verbose" || arg == "-v":
+			showSQL = true
+
 		default:
 			rest = append(rest, arg)
 		}
 	}
-	return dbURL, dir, table, rest
+	return dbURL, dir, table, showSQL, rest
 }
 
 // ParseGlobalFlags extracts global flags such as --database-url from command arguments.
 func ParseGlobalFlags(args []string) (dbURL string, rest []string) {
-	dbURL, _, _, rest = ParseFlags(args)
+	dbURL, _, _, _, rest = ParseFlags(args)
 	return dbURL, rest
 }
 
@@ -97,7 +102,7 @@ func Run(args []string) int {
 
 // RunWithWriters dispatches subcommands with custom standard output and error writers for testability.
 func RunWithWriters(args []string, stdout, stderr io.Writer) int {
-	flagDBURL, flagDir, flagTable, rest := ParseFlags(args)
+	flagDBURL, flagDir, flagTable, flagShowSQL, rest := ParseFlags(args)
 
 	if len(rest) == 0 {
 		fmt.Fprint(stderr, usage)
@@ -107,7 +112,7 @@ func RunWithWriters(args []string, stdout, stderr io.Writer) int {
 	cmd, cmdArgs := rest[0], rest[1:]
 
 	// Secondary flag check in command arguments if placed after command (e.g. schemago status --database-url <url>)
-	if subURL, subDir, subTable, _ := ParseFlags(cmdArgs); subURL != "" || subDir != "" || subTable != "" {
+	if subURL, subDir, subTable, subShowSQL, _ := ParseFlags(cmdArgs); subURL != "" || subDir != "" || subTable != "" || subShowSQL {
 		if flagDBURL == "" {
 			flagDBURL = subURL
 		}
@@ -117,13 +122,16 @@ func RunWithWriters(args []string, stdout, stderr io.Writer) int {
 		if flagTable == "" {
 			flagTable = subTable
 		}
+		if !flagShowSQL {
+			flagShowSQL = subShowSQL
+		}
 	}
 
 	switch cmd {
 	case "status":
 		return handleStatus(stdout, stderr, flagDBURL, flagDir, flagTable)
 	case "plan":
-		return handleDatabaseCommand(stdout, stderr, "plan", flagDBURL)
+		return handlePlan(stdout, stderr, flagDBURL, flagDir, flagTable, flagShowSQL)
 	case "apply":
 		return handleDatabaseCommand(stdout, stderr, "apply", flagDBURL)
 	case "dry-run":
@@ -184,6 +192,59 @@ func handleStatus(stdout, stderr io.Writer, flagDBURL, flagDir, flagTable string
 	return report.ExitCode()
 }
 
+func handlePlan(stdout, stderr io.Writer, flagDBURL, flagDir, flagTable string, showSQL bool) int {
+	cfg, err := config.NewWithOpts(flagDBURL, flagDir, flagTable, config.DefaultTimeout)
+	if err != nil {
+		fmt.Fprintf(stderr, "schemago plan error: %v\n", err)
+		return 1
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
+	defer cancel()
+
+	conn, err := db.ConnectAndPing(ctx, cfg.DatabaseURL, cfg.Timeout)
+	if err != nil {
+		fmt.Fprintf(stderr, "schemago plan error: %v\n", err)
+		return 1
+	}
+	defer conn.Close()
+
+	if err := history.EnsureTable(ctx, conn, cfg.TableName); err != nil {
+		fmt.Fprintf(stderr, "schemago plan error: %v\n", err)
+		return 1
+	}
+
+	applied, err := history.GetAppliedMigrations(ctx, conn, cfg.TableName)
+	if err != nil {
+		fmt.Fprintf(stderr, "schemago plan error: %v\n", err)
+		return 1
+	}
+
+	discovered, err := migration.Discover(cfg.MigrationsDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			discovered = nil
+		} else {
+			fmt.Fprintf(stderr, "schemago plan error: %v\n", err)
+			return 1
+		}
+	}
+
+	pending, err := history.ComputePending(discovered, applied)
+	if err != nil {
+		fmt.Fprintf(stderr, "schemago plan error: %v\n", err)
+		return 1
+	}
+
+	p := plan.BuildPlan(pending)
+	if err := plan.FormatPlan(stdout, p, plan.Options{ShowSQL: showSQL}); err != nil {
+		fmt.Fprintf(stderr, "schemago plan error: %v\n", err)
+		return 1
+	}
+
+	return 0
+}
+
 func handleDatabaseCommand(stdout, stderr io.Writer, cmdName string, flagDBURL string) int {
 	cfg, err := config.New(flagDBURL, config.DefaultTimeout)
 	if err != nil {
@@ -208,4 +269,5 @@ func notImplemented(w io.Writer, name string) int {
 	fmt.Fprintf(w, "schemago %s: not implemented yet\n", name)
 	return 1
 }
+
 
