@@ -98,7 +98,7 @@ func RecordMigration(ctx context.Context, db Execer, tableName string, record *A
 	query := fmt.Sprintf(`INSERT INTO %s (version, name, applied_at, checksum)
 		VALUES ($1, $2, $3, $4)`, tableName)
 
-	if _, err := db.ExecContext(ctx, query, record.Version, record.Name, appliedAt, record.Checksum); err != nil {
+	if _, err := db.ExecContext(ctx, query, record.Version, record.Name, appliedAt.Format(time.RFC3339), record.Checksum); err != nil {
 		return fmt.Errorf("failed to record migration version %d (%q): %w", record.Version, record.Name, err)
 	}
 
@@ -123,9 +123,28 @@ func GetAppliedMigrations(ctx context.Context, db Execer, tableName string) ([]*
 	var records []*AppliedMigration
 	for rows.Next() {
 		var rec AppliedMigration
-		if err := rows.Scan(&rec.Version, &rec.Name, &rec.AppliedAt, &rec.Checksum); err != nil {
+		var appliedAtVal any
+		if err := rows.Scan(&rec.Version, &rec.Name, &appliedAtVal, &rec.Checksum); err != nil {
 			return nil, fmt.Errorf("failed to scan applied migration record: %w", err)
 		}
+
+		switch v := appliedAtVal.(type) {
+		case time.Time:
+			rec.AppliedAt = v
+		case string:
+			if t, err := time.Parse(time.RFC3339, v); err == nil {
+				rec.AppliedAt = t
+			} else if t, err := time.Parse("2006-01-02 15:04:05.999999999-07:00", v); err == nil {
+				rec.AppliedAt = t
+			} else if t, err := time.Parse("2006-01-02 15:04:05", v); err == nil {
+				rec.AppliedAt = t
+			}
+		case []byte:
+			if t, err := time.Parse(time.RFC3339, string(v)); err == nil {
+				rec.AppliedAt = t
+			}
+		}
+
 		records = append(records, &rec)
 	}
 
