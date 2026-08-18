@@ -58,6 +58,16 @@ For architectural details on driver selection and connection handling, see [docs
 
 For schema specifications and integrity validation rules, see [docs/schema_history.md](docs/schema_history.md).
 
+## Observability, Exit Codes & Structured Logging
+
+`schemago` provides obvious, machine-readable error reporting for CI pipelines:
+
+- **Statement & Line Tracking**: Every failure identifies the offending migration file, statement index, line number, SQL snippet, and database error cause.
+- **Consistent Exit Codes**: Exit `0` for success, `1` for execution failure/pending status/checksum drift, `2` for usage errors.
+- **Structured JSON Flag (`--json`)**: Output command results and errors as formatted JSON for automated log parsing in CI/CD pipelines.
+
+For detailed specifications and examples, see [docs/observability.md](docs/observability.md).
+
 ## Status
 
 Early development. Postgres first; MySQL and more later. See the issue tracker for the
