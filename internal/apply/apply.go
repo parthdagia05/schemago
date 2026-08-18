@@ -83,6 +83,22 @@ func Apply(ctx context.Context, db TxBeginnerContext, tableName string, pending 
 			continue
 		}
 
+		if q, ok := db.(history.Execer); ok {
+			applied, err := history.GetAppliedMigrations(ctx, q, tableName)
+			if err == nil {
+				alreadyApplied := false
+				for _, app := range applied {
+					if app.Version == file.Version {
+						alreadyApplied = true
+						break
+					}
+				}
+				if alreadyApplied {
+					continue
+				}
+			}
+		}
+
 		start := time.Now()
 
 		content, err := os.ReadFile(file.Path)
@@ -180,7 +196,7 @@ func Apply(ctx context.Context, db TxBeginnerContext, tableName string, pending 
 
 // FormatResult writes a structured, human-readable summary of the apply execution to w.
 func FormatResult(w io.Writer, res *Result) error {
-	if res == nil || res.TotalPending == 0 {
+	if res == nil || res.TotalPending == 0 || (len(res.Applied) == 0 && res.Failed == nil) {
 		_, err := fmt.Fprintln(w, "Nothing to apply. Database is up to date.")
 		return err
 	}

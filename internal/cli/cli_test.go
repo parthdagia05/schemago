@@ -3,7 +3,9 @@ package cli
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/parthdagia05/schemago/internal/config"
@@ -55,8 +57,8 @@ func TestParseGlobalFlags(t *testing.T) {
 }
 
 func TestParseFlags(t *testing.T) {
-	args := []string{"--database-url", "postgres://localhost/test", "--dir", "my_migrations", "--table", "custom_history", "--sql", "plan"}
-	gotURL, gotDir, gotTable, gotShowSQL, gotRest := ParseFlags(args)
+	args := []string{"--database-url", "postgres://localhost/test", "--dir", "my_migrations", "--table", "custom_history", "--sql", "--no-lock", "plan"}
+	gotURL, gotDir, gotTable, gotShowSQL, gotNoLock, gotRest := ParseFlags(args)
 
 	if gotURL != "postgres://localhost/test" {
 		t.Errorf("gotURL = %q, want postgres://localhost/test", gotURL)
@@ -69,6 +71,9 @@ func TestParseFlags(t *testing.T) {
 	}
 	if !gotShowSQL {
 		t.Errorf("gotShowSQL = false, want true")
+	}
+	if !gotNoLock {
+		t.Errorf("gotNoLock = false, want true")
 	}
 	if len(gotRest) != 1 || gotRest[0] != "plan" {
 		t.Errorf("gotRest = %v, want [plan]", gotRest)
@@ -177,6 +182,87 @@ func TestRunWithWritersApplyUnreachableDB(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "schemago apply error:") {
 		t.Errorf("expected schemago apply error in stderr, got: %s", stderr.String())
+	}
+}
+
+func TestRunWithWritersApply_ConcurrentRunners(t *testing.T) {
+	tempDir := t.TempDir()
+
+	m1 := filepath.Join(tempDir, "0001_create_users.sql")
+	_ = os.WriteFile(m1, []byte("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT);"), 0644)
+	m2 := filepath.Join(tempDir, "0002_create_posts.sql")
+	_ = os.WriteFile(m2, []byte("CREATE TABLE posts (id INTEGER PRIMARY KEY, title TEXT);"), 0644)
+
+	dbDir := t.TempDir()
+	dbPath := "sqlite:" + filepath.Join(dbDir, "test_concurrent.db")
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	out1 := &bytes.Buffer{}
+	err1 := &bytes.Buffer{}
+	code1Ch := make(chan int, 1)
+
+	out2 := &bytes.Buffer{}
+	err2 := &bytes.Buffer{}
+	code2Ch := make(chan int, 1)
+
+	go func() {
+		defer wg.Done()
+		code := RunWithWriters([]string{"--database-url", dbPath, "--dir", tempDir, "apply"}, out1, err1)
+		code1Ch <- code
+	}()
+
+	go func() {
+		defer wg.Done()
+		code := RunWithWriters([]string{"--database-url", dbPath, "--dir", tempDir, "apply"}, out2, err2)
+		code2Ch <- code
+	}()
+
+	wg.Wait()
+
+	code1 := <-code1Ch
+	code2 := <-code2Ch
+
+	if code1 != 0 || code2 != 0 {
+		t.Fatalf("expected exit code 0 for both concurrent runners, got code1=%d (err: %s), code2=%d (err: %s)", code1, err1.String(), code2, err2.String())
+	}
+
+	combinedOutput := out1.String() + "\n" + out2.String()
+
+	if !strings.Contains(combinedOutput, "Successfully applied 2 migrations.") {
+		t.Errorf("expected output to contain successful application of 2 migrations, got:\nRunner 1:\n%s\nRunner 2:\n%s", out1.String(), out2.String())
+	}
+
+	if !strings.Contains(combinedOutput, "Nothing to apply. Database is up to date.") {
+		t.Errorf("expected waiter runner output to contain 'Nothing to apply. Database is up to date.', got:\nRunner 1:\n%s\nRunner 2:\n%s", out1.String(), out2.String())
+	}
+}
+
+func TestRunWithWritersApply_LockReleasedOnFailure(t *testing.T) {
+	tempDir := t.TempDir()
+	dbDir := t.TempDir()
+	dbPath := "sqlite:" + filepath.Join(dbDir, "test_failure.db")
+
+	m1 := filepath.Join(tempDir, "0001_failing.sql")
+	_ = os.WriteFile(m1, []byte("INVALID SQL SYNTAX;"), 0644)
+
+	stdout1 := &bytes.Buffer{}
+	stderr1 := &bytes.Buffer{}
+
+	code1 := RunWithWriters([]string{"--database-url", dbPath, "--dir", tempDir, "apply"}, stdout1, stderr1)
+	if code1 != 1 {
+		t.Fatalf("expected exit code 1 on failing migration, got %d", code1)
+	}
+
+	_ = os.WriteFile(m1, []byte("CREATE TABLE fixed (id INTEGER PRIMARY KEY);"), 0644)
+
+	stdout2 := &bytes.Buffer{}
+	stderr2 := &bytes.Buffer{}
+
+	code2 := RunWithWriters([]string{"--database-url", dbPath, "--dir", tempDir, "apply"}, stdout2, stderr2)
+	if code2 != 0 {
+		t.Fatalf("expected exit code 0 on re-run after fix, got %d (err: %s)", code2, stderr2.String())
 	}
 }
 
