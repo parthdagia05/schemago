@@ -13,6 +13,7 @@ import (
 	"github.com/parthdagia05/schemago/internal/config"
 	"github.com/parthdagia05/schemago/internal/db"
 	"github.com/parthdagia05/schemago/internal/history"
+	"github.com/parthdagia05/schemago/internal/lock"
 	"github.com/parthdagia05/schemago/internal/migration"
 	"github.com/parthdagia05/schemago/internal/plan"
 	"github.com/parthdagia05/schemago/internal/status"
@@ -35,13 +36,14 @@ Global Flags:
   --dir string            Directory containing migration files (default "migrations")
   --table string          Schema history table name (default "schemago_migrations")
   --sql                   Show full SQL statements in plan output
+  --no-lock               Disable advisory locking during migration apply
 
 Run "schemago <command> --help" for details on a command.
 `
 
-// ParseFlags extracts global and command flags such as --database-url, --dir, --table, and --sql from command arguments,
+// ParseFlags extracts global and command flags such as --database-url, --dir, --table, --sql, and --no-lock from command arguments,
 // preserving positional subcommand arguments.
-func ParseFlags(args []string) (dbURL, dir, table string, showSQL bool, rest []string) {
+func ParseFlags(args []string) (dbURL, dir, table string, showSQL, noLock bool, rest []string) {
 	rest = make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -83,16 +85,19 @@ func ParseFlags(args []string) (dbURL, dir, table string, showSQL bool, rest []s
 		case arg == "--sql" || arg == "-sql" || arg == "--show-sql" || arg == "--verbose" || arg == "-v":
 			showSQL = true
 
+		case arg == "--no-lock" || arg == "-no-lock" || arg == "--lock=false":
+			noLock = true
+
 		default:
 			rest = append(rest, arg)
 		}
 	}
-	return dbURL, dir, table, showSQL, rest
+	return dbURL, dir, table, showSQL, noLock, rest
 }
 
 // ParseGlobalFlags extracts global flags such as --database-url from command arguments.
 func ParseGlobalFlags(args []string) (dbURL string, rest []string) {
-	dbURL, _, _, _, rest = ParseFlags(args)
+	dbURL, _, _, _, _, rest = ParseFlags(args)
 	return dbURL, rest
 }
 
@@ -103,7 +108,7 @@ func Run(args []string) int {
 
 // RunWithWriters dispatches subcommands with custom standard output and error writers for testability.
 func RunWithWriters(args []string, stdout, stderr io.Writer) int {
-	flagDBURL, flagDir, flagTable, flagShowSQL, rest := ParseFlags(args)
+	flagDBURL, flagDir, flagTable, flagShowSQL, flagNoLock, rest := ParseFlags(args)
 
 	if len(rest) == 0 {
 		fmt.Fprint(stderr, usage)
@@ -112,8 +117,8 @@ func RunWithWriters(args []string, stdout, stderr io.Writer) int {
 
 	cmd, cmdArgs := rest[0], rest[1:]
 
-	// Secondary flag check in command arguments if placed after command (e.g. schemago status --database-url <url>)
-	if subURL, subDir, subTable, subShowSQL, _ := ParseFlags(cmdArgs); subURL != "" || subDir != "" || subTable != "" || subShowSQL {
+	// Secondary flag check in command arguments if placed after command (e.g. schemago apply --database-url <url>)
+	if subURL, subDir, subTable, subShowSQL, subNoLock, _ := ParseFlags(cmdArgs); subURL != "" || subDir != "" || subTable != "" || subShowSQL || subNoLock {
 		if flagDBURL == "" {
 			flagDBURL = subURL
 		}
@@ -126,6 +131,9 @@ func RunWithWriters(args []string, stdout, stderr io.Writer) int {
 		if !flagShowSQL {
 			flagShowSQL = subShowSQL
 		}
+		if !flagNoLock {
+			flagNoLock = subNoLock
+		}
 	}
 
 	switch cmd {
@@ -134,7 +142,7 @@ func RunWithWriters(args []string, stdout, stderr io.Writer) int {
 	case "plan":
 		return handlePlan(stdout, stderr, flagDBURL, flagDir, flagTable, flagShowSQL)
 	case "apply":
-		return handleApply(stdout, stderr, flagDBURL, flagDir, flagTable)
+		return handleApply(stdout, stderr, flagDBURL, flagDir, flagTable, flagNoLock)
 	case "dry-run":
 		return handleDatabaseCommand(stdout, stderr, "dry-run", flagDBURL)
 	case "help", "-h", "--help":
@@ -246,7 +254,7 @@ func handlePlan(stdout, stderr io.Writer, flagDBURL, flagDir, flagTable string, 
 	return 0
 }
 
-func handleApply(stdout, stderr io.Writer, flagDBURL, flagDir, flagTable string) int {
+func handleApply(stdout, stderr io.Writer, flagDBURL, flagDir, flagTable string, noLock bool) int {
 	cfg, err := config.NewWithOpts(flagDBURL, flagDir, flagTable, config.DefaultTimeout)
 	if err != nil {
 		fmt.Fprintf(stderr, "schemago apply error: %v\n", err)
@@ -256,12 +264,30 @@ func handleApply(stdout, stderr io.Writer, flagDBURL, flagDir, flagTable string)
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
 	defer cancel()
 
-	conn, err := db.ConnectAndPing(ctx, cfg.DatabaseURL, cfg.Timeout)
+	dbConn, err := db.ConnectAndPing(ctx, cfg.DatabaseURL, cfg.Timeout)
+	if err != nil {
+		fmt.Fprintf(stderr, "schemago apply error: %v\n", err)
+		return 1
+	}
+	defer dbConn.Close()
+
+	conn, err := dbConn.Conn(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "schemago apply error: %v\n", err)
 		return 1
 	}
 	defer conn.Close()
+
+	if !noLock {
+		l := lock.New(conn, lock.GenerateLockID(cfg.TableName))
+		if err := l.Lock(ctx); err != nil {
+			fmt.Fprintf(stderr, "schemago apply error: %v\n", err)
+			return 1
+		}
+		defer func() {
+			_ = l.Unlock(context.Background())
+		}()
+	}
 
 	if err := history.EnsureTable(ctx, conn, cfg.TableName); err != nil {
 		fmt.Fprintf(stderr, "schemago apply error: %v\n", err)
@@ -328,5 +354,3 @@ func notImplemented(w io.Writer, name string) int {
 	fmt.Fprintf(w, "schemago %s: not implemented yet\n", name)
 	return 1
 }
-
-

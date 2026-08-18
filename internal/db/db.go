@@ -10,8 +10,9 @@ import (
 	"strings"
 	"time"
 
-	// Register pgx database driver for database/sql compatibility.
+	// Register pgx and sqlite database drivers for database/sql compatibility.
 	_ "github.com/jackc/pgx/v5/stdlib"
+	_ "modernc.org/sqlite"
 )
 
 // DriverName specifies the database driver identifier used by database/sql.
@@ -59,15 +60,24 @@ func FormatError(err error, timeout time.Duration) error {
 	}
 }
 
-// Connect creates a database connection handle using the pgx driver without verifying immediate connectivity.
+// Connect creates a database connection handle using the appropriate database driver.
 func Connect(connectionString string) (*sql.DB, error) {
 	if strings.TrimSpace(connectionString) == "" {
 		return nil, ErrEmptyConnectionString
 	}
 
-	db, err := sql.Open(DriverName, connectionString)
+	driver := DriverName
+	dsn := connectionString
+	if strings.HasPrefix(connectionString, "sqlite:") || strings.HasPrefix(connectionString, "file:") || connectionString == ":memory:" {
+		driver = "sqlite"
+		if strings.HasPrefix(connectionString, "sqlite:") {
+			dsn = strings.TrimPrefix(connectionString, "sqlite:")
+		}
+	}
+
+	db, err := sql.Open(driver, dsn)
 	if err != nil {
-		return nil, fmt.Errorf("failed to initialize PostgreSQL driver: %w", err)
+		return nil, fmt.Errorf("failed to initialize database driver: %w", err)
 	}
 
 	return db, nil
