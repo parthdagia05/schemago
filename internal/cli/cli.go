@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/parthdagia05/schemago/internal/apply"
 	"github.com/parthdagia05/schemago/internal/config"
 	"github.com/parthdagia05/schemago/internal/db"
 	"github.com/parthdagia05/schemago/internal/history"
@@ -133,7 +134,7 @@ func RunWithWriters(args []string, stdout, stderr io.Writer) int {
 	case "plan":
 		return handlePlan(stdout, stderr, flagDBURL, flagDir, flagTable, flagShowSQL)
 	case "apply":
-		return handleDatabaseCommand(stdout, stderr, "apply", flagDBURL)
+		return handleApply(stdout, stderr, flagDBURL, flagDir, flagTable)
 	case "dry-run":
 		return handleDatabaseCommand(stdout, stderr, "dry-run", flagDBURL)
 	case "help", "-h", "--help":
@@ -239,6 +240,64 @@ func handlePlan(stdout, stderr io.Writer, flagDBURL, flagDir, flagTable string, 
 	p := plan.BuildPlan(pending)
 	if err := plan.FormatPlan(stdout, p, plan.Options{ShowSQL: showSQL}); err != nil {
 		fmt.Fprintf(stderr, "schemago plan error: %v\n", err)
+		return 1
+	}
+
+	return 0
+}
+
+func handleApply(stdout, stderr io.Writer, flagDBURL, flagDir, flagTable string) int {
+	cfg, err := config.NewWithOpts(flagDBURL, flagDir, flagTable, config.DefaultTimeout)
+	if err != nil {
+		fmt.Fprintf(stderr, "schemago apply error: %v\n", err)
+		return 1
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
+	defer cancel()
+
+	conn, err := db.ConnectAndPing(ctx, cfg.DatabaseURL, cfg.Timeout)
+	if err != nil {
+		fmt.Fprintf(stderr, "schemago apply error: %v\n", err)
+		return 1
+	}
+	defer conn.Close()
+
+	if err := history.EnsureTable(ctx, conn, cfg.TableName); err != nil {
+		fmt.Fprintf(stderr, "schemago apply error: %v\n", err)
+		return 1
+	}
+
+	applied, err := history.GetAppliedMigrations(ctx, conn, cfg.TableName)
+	if err != nil {
+		fmt.Fprintf(stderr, "schemago apply error: %v\n", err)
+		return 1
+	}
+
+	discovered, err := migration.Discover(cfg.MigrationsDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			discovered = nil
+		} else {
+			fmt.Fprintf(stderr, "schemago apply error: %v\n", err)
+			return 1
+		}
+	}
+
+	pending, err := history.ComputePending(discovered, applied)
+	if err != nil {
+		fmt.Fprintf(stderr, "schemago apply error: %v\n", err)
+		return 1
+	}
+
+	res, applyErr := apply.Apply(ctx, conn, cfg.TableName, pending)
+	if formatErr := apply.FormatResult(stdout, res); formatErr != nil {
+		fmt.Fprintf(stderr, "schemago apply error: %v\n", formatErr)
+		return 1
+	}
+
+	if applyErr != nil {
+		fmt.Fprintf(stderr, "schemago apply error: %v\n", applyErr)
 		return 1
 	}
 
