@@ -68,6 +68,16 @@ For schema specifications and integrity validation rules, see [docs/schema_histo
 
 For detailed specifications and examples, see [docs/observability.md](docs/observability.md).
 
+## Integration Testing
+
+`schemago` includes an end-to-end integration test suite against real PostgreSQL instances using `testcontainers-go` and CI service containers.
+
+```bash
+go test -v ./...
+```
+
+For test suite architecture and coverage details, see [docs/integration_testing.md](docs/integration_testing.md).
+
 ## Status
 
 Early development. Postgres first; MySQL and more later. See the issue tracker for the

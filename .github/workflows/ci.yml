@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [ master, "feat/*" ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  test:
+    name: Test Suite
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Run all tests against Postgres
+        env:
+          TEST_POSTGRES_DSN: "postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable"
+        run: go test -v -race ./...

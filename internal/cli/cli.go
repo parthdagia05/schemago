@@ -469,11 +469,6 @@ func handleDryRun(stdout, stderr io.Writer, flagDBURL, flagDir, flagTable string
 		}()
 	}
 
-	if err := history.EnsureTable(ctx, conn, cfg.TableName); err != nil {
-		writeError(stderr, "dry-run", err, jsonOutput, ExitFailure)
-		return ExitFailure
-	}
-
 	applied, err := history.GetAppliedMigrations(ctx, conn, cfg.TableName)
 	if err != nil {
 		writeError(stderr, "dry-run", err, jsonOutput, ExitFailure)
