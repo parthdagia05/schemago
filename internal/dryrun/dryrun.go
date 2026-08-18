@@ -63,10 +63,13 @@ func DryRun(ctx context.Context, db apply.TxBeginnerContext, tableName string, p
 		content, err := os.ReadFile(file.Path)
 		if err != nil {
 			migErr := fmt.Errorf("failed to read migration file %q: %w", file.Path, err)
+			dur := time.Since(start)
 			res.Failed = &apply.MigrationResult{
-				File:     file,
-				Duration: time.Since(start),
-				Error:    migErr,
+				File:       file,
+				Duration:   dur,
+				DurationMs: dur.Milliseconds(),
+				Error:      migErr,
+				ErrMessage: migErr.Error(),
 			}
 			return res, migErr
 		}
@@ -74,21 +77,34 @@ func DryRun(ctx context.Context, db apply.TxBeginnerContext, tableName string, p
 		sqlContent := string(content)
 		if apply.IsNonTransactional(sqlContent) {
 			migErr := fmt.Errorf("%w: migration %q contains non-transactional statement", apply.ErrNonTransactional, file.Filename)
+			dur := time.Since(start)
 			res.Failed = &apply.MigrationResult{
-				File:     file,
-				Duration: time.Since(start),
-				Error:    migErr,
+				File:       file,
+				Duration:   dur,
+				DurationMs: dur.Milliseconds(),
+				Error:      migErr,
+				ErrMessage: migErr.Error(),
 			}
 			return res, migErr
 		}
 
-		if strings.TrimSpace(sqlContent) != "" {
-			if _, err := tx.ExecContext(ctx, sqlContent); err != nil {
-				migErr := fmt.Errorf("failed to execute migration %q: %w", file.Filename, err)
+		stmts := migration.SplitStatements(sqlContent)
+		for _, stmt := range stmts {
+			if strings.TrimSpace(stmt.SQL) == "" {
+				continue
+			}
+			if _, err := tx.ExecContext(ctx, stmt.SQL); err != nil {
+				migErr := fmt.Errorf("failed to execute statement %d (line %d) in migration %q: %w", stmt.Index, stmt.LineNumber, file.Filename, err)
+				dur := time.Since(start)
 				res.Failed = &apply.MigrationResult{
-					File:     file,
-					Duration: time.Since(start),
-					Error:    migErr,
+					File:         file,
+					Duration:     dur,
+					DurationMs:   dur.Milliseconds(),
+					Error:        migErr,
+					ErrMessage:   migErr.Error(),
+					StatementIdx: stmt.Index,
+					LineNumber:   stmt.LineNumber,
+					StatementSQL: strings.TrimSpace(stmt.SQL),
 				}
 				return res, migErr
 			}
@@ -111,18 +127,22 @@ func DryRun(ctx context.Context, db apply.TxBeginnerContext, tableName string, p
 
 		if err := history.RecordMigration(ctx, tx, tableName, record); err != nil {
 			migErr := fmt.Errorf("failed to record migration %q in history table: %w", file.Filename, err)
+			dur := time.Since(start)
 			res.Failed = &apply.MigrationResult{
-				File:     file,
-				Duration: time.Since(start),
-				Error:    migErr,
+				File:       file,
+				Duration:   dur,
+				DurationMs: dur.Milliseconds(),
+				Error:      migErr,
+				ErrMessage: migErr.Error(),
 			}
 			return res, migErr
 		}
 
 		duration := time.Since(start)
 		res.Applied = append(res.Applied, &apply.MigrationResult{
-			File:     file,
-			Duration: duration,
+			File:       file,
+			Duration:   duration,
+			DurationMs: duration.Milliseconds(),
 		})
 	}
 
@@ -166,8 +186,23 @@ func FormatResult(w io.Writer, res *Result) error {
 		if _, err := fmt.Fprintf(w, "  ✗ %s FAILED (%s)\n", res.Failed.File.Filename, durStr); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintf(w, "    Error: %v\n", res.Failed.Error); err != nil {
-			return err
+		if res.Failed.StatementIdx > 0 && res.Failed.LineNumber > 0 {
+			if _, err := fmt.Fprintf(w, "    Error at statement %d (line %d): %v\n", res.Failed.StatementIdx, res.Failed.LineNumber, res.Failed.Error); err != nil {
+				return err
+			}
+		} else {
+			if _, err := fmt.Fprintf(w, "    Error: %v\n", res.Failed.Error); err != nil {
+				return err
+			}
+		}
+		if res.Failed.StatementSQL != "" {
+			firstLine := strings.Split(res.Failed.StatementSQL, "\n")[0]
+			if len(firstLine) > 80 {
+				firstLine = firstLine[:77] + "..."
+			}
+			if _, err := fmt.Fprintf(w, "    Statement: %s\n", firstLine); err != nil {
+				return err
+			}
 		}
 		if _, err := fmt.Fprintf(w, "    [DRY-RUN] Transaction rolled back cleanly. No changes were made to the database.\n"); err != nil {
 			return err

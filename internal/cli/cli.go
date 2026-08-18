@@ -3,6 +3,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +19,17 @@ import (
 	"github.com/parthdagia05/schemago/internal/migration"
 	"github.com/parthdagia05/schemago/internal/plan"
 	"github.com/parthdagia05/schemago/internal/status"
+)
+
+const (
+	// ExitSuccess indicates successful execution with no errors or unapplied/drifted migrations.
+	ExitSuccess = 0
+
+	// ExitFailure indicates runtime failure, database error, transaction rollback, or pending/drifted status.
+	ExitFailure = 1
+
+	// ExitUsage indicates invalid command usage, missing arguments, or unknown subcommands.
+	ExitUsage = 2
 )
 
 const usage = `schemago - a standalone database migration runner
@@ -38,13 +50,26 @@ Global Flags:
   --table string          Schema history table name (default "schemago_migrations")
   --sql                   Show full SQL statements in plan output
   --no-lock               Disable advisory locking during migration apply
+  --json                  Output status, plan, apply, dry-run, and errors as structured JSON
+
+Exit Codes:
+  0    Success
+  1    Execution failure, DB error, transaction rollback, or pending/drifted status
+  2    CLI usage error, invalid flags, or unknown command
 
 Run "schemago <command> --help" for details on a command.
 `
 
-// ParseFlags extracts global and command flags such as --database-url, --dir, --table, --sql, and --no-lock from command arguments,
+// CLIErrorResponse structures CLI errors when --json is enabled.
+type CLIErrorResponse struct {
+	Command  string `json:"command,omitempty"`
+	Error    string `json:"error"`
+	ExitCode int    `json:"exit_code"`
+}
+
+// ParseFlags extracts global and command flags such as --database-url, --dir, --table, --sql, --no-lock, and --json from command arguments,
 // preserving positional subcommand arguments.
-func ParseFlags(args []string) (dbURL, dir, table string, showSQL, noLock bool, rest []string) {
+func ParseFlags(args []string) (dbURL, dir, table string, showSQL, noLock, jsonOutput bool, rest []string) {
 	rest = make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -89,16 +114,19 @@ func ParseFlags(args []string) (dbURL, dir, table string, showSQL, noLock bool, 
 		case arg == "--no-lock" || arg == "-no-lock" || arg == "--lock=false":
 			noLock = true
 
+		case arg == "--json" || arg == "-json" || arg == "--output=json":
+			jsonOutput = true
+
 		default:
 			rest = append(rest, arg)
 		}
 	}
-	return dbURL, dir, table, showSQL, noLock, rest
+	return dbURL, dir, table, showSQL, noLock, jsonOutput, rest
 }
 
 // ParseGlobalFlags extracts global flags such as --database-url from command arguments.
 func ParseGlobalFlags(args []string) (dbURL string, rest []string) {
-	dbURL, _, _, _, _, rest = ParseFlags(args)
+	dbURL, _, _, _, _, _, rest = ParseFlags(args)
 	return dbURL, rest
 }
 
@@ -109,17 +137,21 @@ func Run(args []string) int {
 
 // RunWithWriters dispatches subcommands with custom standard output and error writers for testability.
 func RunWithWriters(args []string, stdout, stderr io.Writer) int {
-	flagDBURL, flagDir, flagTable, flagShowSQL, flagNoLock, rest := ParseFlags(args)
+	flagDBURL, flagDir, flagTable, flagShowSQL, flagNoLock, flagJSON, rest := ParseFlags(args)
 
 	if len(rest) == 0 {
-		fmt.Fprint(stderr, usage)
-		return 2
+		if flagJSON {
+			writeError(stderr, "", errors.New("no subcommand provided"), true, ExitUsage)
+		} else {
+			fmt.Fprint(stderr, usage)
+		}
+		return ExitUsage
 	}
 
 	cmd, cmdArgs := rest[0], rest[1:]
 
 	// Secondary flag check in command arguments if placed after command (e.g. schemago apply --database-url <url>)
-	if subURL, subDir, subTable, subShowSQL, subNoLock, _ := ParseFlags(cmdArgs); subURL != "" || subDir != "" || subTable != "" || subShowSQL || subNoLock {
+	if subURL, subDir, subTable, subShowSQL, subNoLock, subJSON, _ := ParseFlags(cmdArgs); subURL != "" || subDir != "" || subTable != "" || subShowSQL || subNoLock || subJSON {
 		if flagDBURL == "" {
 			flagDBURL = subURL
 		}
@@ -135,31 +167,66 @@ func RunWithWriters(args []string, stdout, stderr io.Writer) int {
 		if !flagNoLock {
 			flagNoLock = subNoLock
 		}
+		if !flagJSON {
+			flagJSON = subJSON
+		}
 	}
 
 	switch cmd {
 	case "status":
-		return handleStatus(stdout, stderr, flagDBURL, flagDir, flagTable)
+		return handleStatus(stdout, stderr, flagDBURL, flagDir, flagTable, flagJSON)
 	case "plan":
-		return handlePlan(stdout, stderr, flagDBURL, flagDir, flagTable, flagShowSQL)
+		return handlePlan(stdout, stderr, flagDBURL, flagDir, flagTable, flagShowSQL, flagJSON)
 	case "apply":
-		return handleApply(stdout, stderr, flagDBURL, flagDir, flagTable, flagNoLock)
+		return handleApply(stdout, stderr, flagDBURL, flagDir, flagTable, flagNoLock, flagJSON)
 	case "dry-run":
-		return handleDryRun(stdout, stderr, flagDBURL, flagDir, flagTable, flagNoLock)
+		return handleDryRun(stdout, stderr, flagDBURL, flagDir, flagTable, flagNoLock, flagJSON)
 	case "help", "-h", "--help":
-		fmt.Fprint(stdout, usage)
-		return 0
+		if flagJSON {
+			resp := map[string]string{
+				"name":        "schemago",
+				"description": "a standalone database migration runner",
+				"usage":       "schemago [flags] <command> [command flags]",
+			}
+			data, _ := json.MarshalIndent(resp, "", "  ")
+			fmt.Fprintln(stdout, string(data))
+		} else {
+			fmt.Fprint(stdout, usage)
+		}
+		return ExitSuccess
 	default:
-		fmt.Fprintf(stderr, "schemago: unknown command %q\n\n%s", cmd, usage)
-		return 2
+		if flagJSON {
+			writeError(stderr, "", fmt.Errorf("unknown command %q", cmd), true, ExitUsage)
+		} else {
+			fmt.Fprintf(stderr, "schemago: unknown command %q\n\n%s", cmd, usage)
+		}
+		return ExitUsage
 	}
 }
 
-func handleStatus(stdout, stderr io.Writer, flagDBURL, flagDir, flagTable string) int {
+func writeError(w io.Writer, cmdName string, err error, jsonOutput bool, code int) {
+	if jsonOutput {
+		resp := CLIErrorResponse{
+			Command:  cmdName,
+			Error:    err.Error(),
+			ExitCode: code,
+		}
+		data, _ := json.MarshalIndent(resp, "", "  ")
+		fmt.Fprintln(w, string(data))
+	} else {
+		if cmdName != "" {
+			fmt.Fprintf(w, "schemago %s error: %v\n", cmdName, err)
+		} else {
+			fmt.Fprintf(w, "schemago error: %v\n", err)
+		}
+	}
+}
+
+func handleStatus(stdout, stderr io.Writer, flagDBURL, flagDir, flagTable string, jsonOutput bool) int {
 	cfg, err := config.NewWithOpts(flagDBURL, flagDir, flagTable, config.DefaultTimeout)
 	if err != nil {
-		fmt.Fprintf(stderr, "schemago status error: %v\n", err)
-		return 1
+		writeError(stderr, "status", err, jsonOutput, ExitFailure)
+		return ExitFailure
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
@@ -167,20 +234,20 @@ func handleStatus(stdout, stderr io.Writer, flagDBURL, flagDir, flagTable string
 
 	conn, err := db.ConnectAndPing(ctx, cfg.DatabaseURL, cfg.Timeout)
 	if err != nil {
-		fmt.Fprintf(stderr, "schemago status error: %v\n", err)
-		return 1
+		writeError(stderr, "status", err, jsonOutput, ExitFailure)
+		return ExitFailure
 	}
 	defer conn.Close()
 
 	if err := history.EnsureTable(ctx, conn, cfg.TableName); err != nil {
-		fmt.Fprintf(stderr, "schemago status error: %v\n", err)
-		return 1
+		writeError(stderr, "status", err, jsonOutput, ExitFailure)
+		return ExitFailure
 	}
 
 	applied, err := history.GetAppliedMigrations(ctx, conn, cfg.TableName)
 	if err != nil {
-		fmt.Fprintf(stderr, "schemago status error: %v\n", err)
-		return 1
+		writeError(stderr, "status", err, jsonOutput, ExitFailure)
+		return ExitFailure
 	}
 
 	discovered, err := migration.Discover(cfg.MigrationsDir)
@@ -188,25 +255,35 @@ func handleStatus(stdout, stderr io.Writer, flagDBURL, flagDir, flagTable string
 		if errors.Is(err, os.ErrNotExist) {
 			discovered = nil
 		} else {
-			fmt.Fprintf(stderr, "schemago status error: %v\n", err)
-			return 1
+			writeError(stderr, "status", err, jsonOutput, ExitFailure)
+			return ExitFailure
 		}
 	}
 
 	report := status.BuildReport(discovered, applied)
+	if jsonOutput {
+		data, err := json.MarshalIndent(report, "", "  ")
+		if err != nil {
+			writeError(stderr, "status", err, jsonOutput, ExitFailure)
+			return ExitFailure
+		}
+		fmt.Fprintln(stdout, string(data))
+		return report.ExitCode()
+	}
+
 	if err := status.FormatReport(stdout, report); err != nil {
-		fmt.Fprintf(stderr, "schemago status error: %v\n", err)
-		return 1
+		writeError(stderr, "status", err, jsonOutput, ExitFailure)
+		return ExitFailure
 	}
 
 	return report.ExitCode()
 }
 
-func handlePlan(stdout, stderr io.Writer, flagDBURL, flagDir, flagTable string, showSQL bool) int {
+func handlePlan(stdout, stderr io.Writer, flagDBURL, flagDir, flagTable string, showSQL, jsonOutput bool) int {
 	cfg, err := config.NewWithOpts(flagDBURL, flagDir, flagTable, config.DefaultTimeout)
 	if err != nil {
-		fmt.Fprintf(stderr, "schemago plan error: %v\n", err)
-		return 1
+		writeError(stderr, "plan", err, jsonOutput, ExitFailure)
+		return ExitFailure
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
@@ -214,20 +291,20 @@ func handlePlan(stdout, stderr io.Writer, flagDBURL, flagDir, flagTable string, 
 
 	conn, err := db.ConnectAndPing(ctx, cfg.DatabaseURL, cfg.Timeout)
 	if err != nil {
-		fmt.Fprintf(stderr, "schemago plan error: %v\n", err)
-		return 1
+		writeError(stderr, "plan", err, jsonOutput, ExitFailure)
+		return ExitFailure
 	}
 	defer conn.Close()
 
 	if err := history.EnsureTable(ctx, conn, cfg.TableName); err != nil {
-		fmt.Fprintf(stderr, "schemago plan error: %v\n", err)
-		return 1
+		writeError(stderr, "plan", err, jsonOutput, ExitFailure)
+		return ExitFailure
 	}
 
 	applied, err := history.GetAppliedMigrations(ctx, conn, cfg.TableName)
 	if err != nil {
-		fmt.Fprintf(stderr, "schemago plan error: %v\n", err)
-		return 1
+		writeError(stderr, "plan", err, jsonOutput, ExitFailure)
+		return ExitFailure
 	}
 
 	discovered, err := migration.Discover(cfg.MigrationsDir)
@@ -235,31 +312,41 @@ func handlePlan(stdout, stderr io.Writer, flagDBURL, flagDir, flagTable string, 
 		if errors.Is(err, os.ErrNotExist) {
 			discovered = nil
 		} else {
-			fmt.Fprintf(stderr, "schemago plan error: %v\n", err)
-			return 1
+			writeError(stderr, "plan", err, jsonOutput, ExitFailure)
+			return ExitFailure
 		}
 	}
 
 	pending, err := history.ComputePending(discovered, applied)
 	if err != nil {
-		fmt.Fprintf(stderr, "schemago plan error: %v\n", err)
-		return 1
+		writeError(stderr, "plan", err, jsonOutput, ExitFailure)
+		return ExitFailure
 	}
 
 	p := plan.BuildPlan(pending)
-	if err := plan.FormatPlan(stdout, p, plan.Options{ShowSQL: showSQL}); err != nil {
-		fmt.Fprintf(stderr, "schemago plan error: %v\n", err)
-		return 1
+	if jsonOutput {
+		data, err := json.MarshalIndent(p, "", "  ")
+		if err != nil {
+			writeError(stderr, "plan", err, jsonOutput, ExitFailure)
+			return ExitFailure
+		}
+		fmt.Fprintln(stdout, string(data))
+		return ExitSuccess
 	}
 
-	return 0
+	if err := plan.FormatPlan(stdout, p, plan.Options{ShowSQL: showSQL}); err != nil {
+		writeError(stderr, "plan", err, jsonOutput, ExitFailure)
+		return ExitFailure
+	}
+
+	return ExitSuccess
 }
 
-func handleApply(stdout, stderr io.Writer, flagDBURL, flagDir, flagTable string, noLock bool) int {
+func handleApply(stdout, stderr io.Writer, flagDBURL, flagDir, flagTable string, noLock, jsonOutput bool) int {
 	cfg, err := config.NewWithOpts(flagDBURL, flagDir, flagTable, config.DefaultTimeout)
 	if err != nil {
-		fmt.Fprintf(stderr, "schemago apply error: %v\n", err)
-		return 1
+		writeError(stderr, "apply", err, jsonOutput, ExitFailure)
+		return ExitFailure
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
@@ -267,23 +354,23 @@ func handleApply(stdout, stderr io.Writer, flagDBURL, flagDir, flagTable string,
 
 	dbConn, err := db.ConnectAndPing(ctx, cfg.DatabaseURL, cfg.Timeout)
 	if err != nil {
-		fmt.Fprintf(stderr, "schemago apply error: %v\n", err)
-		return 1
+		writeError(stderr, "apply", err, jsonOutput, ExitFailure)
+		return ExitFailure
 	}
 	defer dbConn.Close()
 
 	conn, err := dbConn.Conn(ctx)
 	if err != nil {
-		fmt.Fprintf(stderr, "schemago apply error: %v\n", err)
-		return 1
+		writeError(stderr, "apply", err, jsonOutput, ExitFailure)
+		return ExitFailure
 	}
 	defer conn.Close()
 
 	if !noLock {
 		l := lock.New(conn, lock.GenerateLockID(cfg.TableName))
 		if err := l.Lock(ctx); err != nil {
-			fmt.Fprintf(stderr, "schemago apply error: %v\n", err)
-			return 1
+			writeError(stderr, "apply", err, jsonOutput, ExitFailure)
+			return ExitFailure
 		}
 		defer func() {
 			_ = l.Unlock(context.Background())
@@ -291,14 +378,14 @@ func handleApply(stdout, stderr io.Writer, flagDBURL, flagDir, flagTable string,
 	}
 
 	if err := history.EnsureTable(ctx, conn, cfg.TableName); err != nil {
-		fmt.Fprintf(stderr, "schemago apply error: %v\n", err)
-		return 1
+		writeError(stderr, "apply", err, jsonOutput, ExitFailure)
+		return ExitFailure
 	}
 
 	applied, err := history.GetAppliedMigrations(ctx, conn, cfg.TableName)
 	if err != nil {
-		fmt.Fprintf(stderr, "schemago apply error: %v\n", err)
-		return 1
+		writeError(stderr, "apply", err, jsonOutput, ExitFailure)
+		return ExitFailure
 	}
 
 	discovered, err := migration.Discover(cfg.MigrationsDir)
@@ -306,36 +393,52 @@ func handleApply(stdout, stderr io.Writer, flagDBURL, flagDir, flagTable string,
 		if errors.Is(err, os.ErrNotExist) {
 			discovered = nil
 		} else {
-			fmt.Fprintf(stderr, "schemago apply error: %v\n", err)
-			return 1
+			writeError(stderr, "apply", err, jsonOutput, ExitFailure)
+			return ExitFailure
 		}
 	}
 
 	pending, err := history.ComputePending(discovered, applied)
 	if err != nil {
-		fmt.Fprintf(stderr, "schemago apply error: %v\n", err)
-		return 1
+		writeError(stderr, "apply", err, jsonOutput, ExitFailure)
+		return ExitFailure
 	}
 
 	res, applyErr := apply.Apply(ctx, conn, cfg.TableName, pending)
+	if jsonOutput {
+		if res != nil {
+			data, err := json.MarshalIndent(res, "", "  ")
+			if err == nil {
+				fmt.Fprintln(stdout, string(data))
+			}
+		}
+		if applyErr != nil {
+			if res == nil {
+				writeError(stderr, "apply", applyErr, jsonOutput, ExitFailure)
+			}
+			return ExitFailure
+		}
+		return ExitSuccess
+	}
+
 	if formatErr := apply.FormatResult(stdout, res); formatErr != nil {
-		fmt.Fprintf(stderr, "schemago apply error: %v\n", formatErr)
-		return 1
+		writeError(stderr, "apply", formatErr, jsonOutput, ExitFailure)
+		return ExitFailure
 	}
 
 	if applyErr != nil {
-		fmt.Fprintf(stderr, "schemago apply error: %v\n", applyErr)
-		return 1
+		writeError(stderr, "apply", applyErr, jsonOutput, ExitFailure)
+		return ExitFailure
 	}
 
-	return 0
+	return ExitSuccess
 }
 
-func handleDryRun(stdout, stderr io.Writer, flagDBURL, flagDir, flagTable string, noLock bool) int {
+func handleDryRun(stdout, stderr io.Writer, flagDBURL, flagDir, flagTable string, noLock, jsonOutput bool) int {
 	cfg, err := config.NewWithOpts(flagDBURL, flagDir, flagTable, config.DefaultTimeout)
 	if err != nil {
-		fmt.Fprintf(stderr, "schemago dry-run error: %v\n", err)
-		return 1
+		writeError(stderr, "dry-run", err, jsonOutput, ExitFailure)
+		return ExitFailure
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
@@ -343,23 +446,23 @@ func handleDryRun(stdout, stderr io.Writer, flagDBURL, flagDir, flagTable string
 
 	dbConn, err := db.ConnectAndPing(ctx, cfg.DatabaseURL, cfg.Timeout)
 	if err != nil {
-		fmt.Fprintf(stderr, "schemago dry-run error: %v\n", err)
-		return 1
+		writeError(stderr, "dry-run", err, jsonOutput, ExitFailure)
+		return ExitFailure
 	}
 	defer dbConn.Close()
 
 	conn, err := dbConn.Conn(ctx)
 	if err != nil {
-		fmt.Fprintf(stderr, "schemago dry-run error: %v\n", err)
-		return 1
+		writeError(stderr, "dry-run", err, jsonOutput, ExitFailure)
+		return ExitFailure
 	}
 	defer conn.Close()
 
 	if !noLock {
 		l := lock.New(conn, lock.GenerateLockID(cfg.TableName))
 		if err := l.Lock(ctx); err != nil {
-			fmt.Fprintf(stderr, "schemago dry-run error: %v\n", err)
-			return 1
+			writeError(stderr, "dry-run", err, jsonOutput, ExitFailure)
+			return ExitFailure
 		}
 		defer func() {
 			_ = l.Unlock(context.Background())
@@ -367,14 +470,14 @@ func handleDryRun(stdout, stderr io.Writer, flagDBURL, flagDir, flagTable string
 	}
 
 	if err := history.EnsureTable(ctx, conn, cfg.TableName); err != nil {
-		fmt.Fprintf(stderr, "schemago dry-run error: %v\n", err)
-		return 1
+		writeError(stderr, "dry-run", err, jsonOutput, ExitFailure)
+		return ExitFailure
 	}
 
 	applied, err := history.GetAppliedMigrations(ctx, conn, cfg.TableName)
 	if err != nil {
-		fmt.Fprintf(stderr, "schemago dry-run error: %v\n", err)
-		return 1
+		writeError(stderr, "dry-run", err, jsonOutput, ExitFailure)
+		return ExitFailure
 	}
 
 	discovered, err := migration.Discover(cfg.MigrationsDir)
@@ -382,52 +485,43 @@ func handleDryRun(stdout, stderr io.Writer, flagDBURL, flagDir, flagTable string
 		if errors.Is(err, os.ErrNotExist) {
 			discovered = nil
 		} else {
-			fmt.Fprintf(stderr, "schemago dry-run error: %v\n", err)
-			return 1
+			writeError(stderr, "dry-run", err, jsonOutput, ExitFailure)
+			return ExitFailure
 		}
 	}
 
 	pending, err := history.ComputePending(discovered, applied)
 	if err != nil {
-		fmt.Fprintf(stderr, "schemago dry-run error: %v\n", err)
-		return 1
+		writeError(stderr, "dry-run", err, jsonOutput, ExitFailure)
+		return ExitFailure
 	}
 
 	res, dryRunErr := dryrun.DryRun(ctx, conn, cfg.TableName, pending)
+	if jsonOutput {
+		if res != nil {
+			data, err := json.MarshalIndent(res, "", "  ")
+			if err == nil {
+				fmt.Fprintln(stdout, string(data))
+			}
+		}
+		if dryRunErr != nil {
+			if res == nil {
+				writeError(stderr, "dry-run", dryRunErr, jsonOutput, ExitFailure)
+			}
+			return ExitFailure
+		}
+		return ExitSuccess
+	}
+
 	if formatErr := dryrun.FormatResult(stdout, res); formatErr != nil {
-		fmt.Fprintf(stderr, "schemago dry-run error: %v\n", formatErr)
-		return 1
+		writeError(stderr, "dry-run", formatErr, jsonOutput, ExitFailure)
+		return ExitFailure
 	}
 
 	if dryRunErr != nil {
-		fmt.Fprintf(stderr, "schemago dry-run error: %v\n", dryRunErr)
-		return 1
+		writeError(stderr, "dry-run", dryRunErr, jsonOutput, ExitFailure)
+		return ExitFailure
 	}
 
-	return 0
-}
-
-func handleDatabaseCommand(stdout, stderr io.Writer, cmdName string, flagDBURL string) int {
-	cfg, err := config.New(flagDBURL, config.DefaultTimeout)
-	if err != nil {
-		fmt.Fprintf(stderr, "schemago %s error: %v\n", cmdName, err)
-		return 1
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
-	defer cancel()
-
-	conn, err := db.ConnectAndPing(ctx, cfg.DatabaseURL, cfg.Timeout)
-	if err != nil {
-		fmt.Fprintf(stderr, "schemago %s error: %v\n", cmdName, err)
-		return 1
-	}
-	defer conn.Close()
-
-	return notImplemented(stdout, cmdName)
-}
-
-func notImplemented(w io.Writer, name string) int {
-	fmt.Fprintf(w, "schemago %s: not implemented yet\n", name)
-	return 1
+	return ExitSuccess
 }

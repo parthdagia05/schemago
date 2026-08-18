@@ -5,6 +5,7 @@ package apply
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -40,9 +41,47 @@ type TxBeginnerContext interface {
 
 // MigrationResult holds execution metrics and status for an individual migration.
 type MigrationResult struct {
-	File     *migration.MigrationFile `json:"file"`
-	Duration time.Duration            `json:"duration"`
-	Error    error                    `json:"error,omitempty"`
+	File         *migration.MigrationFile `json:"file"`
+	Duration     time.Duration            `json:"-"`
+	DurationMs   int64                    `json:"duration_ms"`
+	Error        error                    `json:"-"`
+	ErrMessage   string                   `json:"error,omitempty"`
+	StatementIdx int                      `json:"statement_index,omitempty"`
+	LineNumber   int                      `json:"line_number,omitempty"`
+	StatementSQL string                   `json:"statement_sql,omitempty"`
+}
+
+type migrationResultJSON struct {
+	File         *migration.MigrationFile `json:"file"`
+	DurationMs   int64                    `json:"duration_ms"`
+	Error        string                   `json:"error,omitempty"`
+	StatementIdx int                      `json:"statement_index,omitempty"`
+	LineNumber   int                      `json:"line_number,omitempty"`
+	StatementSQL string                   `json:"statement_sql,omitempty"`
+}
+
+// MarshalJSON provides custom JSON serialization for MigrationResult.
+func (m *MigrationResult) MarshalJSON() ([]byte, error) {
+	var errStr string
+	if m.Error != nil {
+		errStr = m.Error.Error()
+	} else if m.ErrMessage != "" {
+		errStr = m.ErrMessage
+	}
+
+	durMs := m.DurationMs
+	if durMs == 0 && m.Duration > 0 {
+		durMs = m.Duration.Milliseconds()
+	}
+
+	return json.Marshal(migrationResultJSON{
+		File:         m.File,
+		DurationMs:   durMs,
+		Error:        errStr,
+		StatementIdx: m.StatementIdx,
+		LineNumber:   m.LineNumber,
+		StatementSQL: m.StatementSQL,
+	})
 }
 
 // Result holds the overall outcome of an apply operation.
@@ -104,10 +143,13 @@ func Apply(ctx context.Context, db TxBeginnerContext, tableName string, pending 
 		content, err := os.ReadFile(file.Path)
 		if err != nil {
 			migErr := fmt.Errorf("failed to read migration file %q: %w", file.Path, err)
+			dur := time.Since(start)
 			res.Failed = &MigrationResult{
-				File:     file,
-				Duration: time.Since(start),
-				Error:    migErr,
+				File:       file,
+				Duration:   dur,
+				DurationMs: dur.Milliseconds(),
+				Error:      migErr,
+				ErrMessage: migErr.Error(),
 			}
 			return res, migErr
 		}
@@ -115,10 +157,13 @@ func Apply(ctx context.Context, db TxBeginnerContext, tableName string, pending 
 		sqlContent := string(content)
 		if IsNonTransactional(sqlContent) {
 			migErr := fmt.Errorf("%w: migration %q contains non-transactional statement", ErrNonTransactional, file.Filename)
+			dur := time.Since(start)
 			res.Failed = &MigrationResult{
-				File:     file,
-				Duration: time.Since(start),
-				Error:    migErr,
+				File:       file,
+				Duration:   dur,
+				DurationMs: dur.Milliseconds(),
+				Error:      migErr,
+				ErrMessage: migErr.Error(),
 			}
 			return res, migErr
 		}
@@ -126,22 +171,35 @@ func Apply(ctx context.Context, db TxBeginnerContext, tableName string, pending 
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
 			migErr := fmt.Errorf("failed to begin transaction for migration %q: %w", file.Filename, err)
+			dur := time.Since(start)
 			res.Failed = &MigrationResult{
-				File:     file,
-				Duration: time.Since(start),
-				Error:    migErr,
+				File:       file,
+				Duration:   dur,
+				DurationMs: dur.Milliseconds(),
+				Error:      migErr,
+				ErrMessage: migErr.Error(),
 			}
 			return res, migErr
 		}
 
-		if strings.TrimSpace(sqlContent) != "" {
-			if _, err := tx.ExecContext(ctx, sqlContent); err != nil {
+		stmts := migration.SplitStatements(sqlContent)
+		for _, stmt := range stmts {
+			if strings.TrimSpace(stmt.SQL) == "" {
+				continue
+			}
+			if _, err := tx.ExecContext(ctx, stmt.SQL); err != nil {
 				_ = tx.Rollback()
-				migErr := fmt.Errorf("failed to execute migration %q: %w", file.Filename, err)
+				migErr := fmt.Errorf("failed to execute statement %d (line %d) in migration %q: %w", stmt.Index, stmt.LineNumber, file.Filename, err)
+				dur := time.Since(start)
 				res.Failed = &MigrationResult{
-					File:     file,
-					Duration: time.Since(start),
-					Error:    migErr,
+					File:         file,
+					Duration:     dur,
+					DurationMs:   dur.Milliseconds(),
+					Error:        migErr,
+					ErrMessage:   migErr.Error(),
+					StatementIdx: stmt.Index,
+					LineNumber:   stmt.LineNumber,
+					StatementSQL: strings.TrimSpace(stmt.SQL),
 				}
 				return res, migErr
 			}
@@ -165,10 +223,13 @@ func Apply(ctx context.Context, db TxBeginnerContext, tableName string, pending 
 		if err := history.RecordMigration(ctx, tx, tableName, record); err != nil {
 			_ = tx.Rollback()
 			migErr := fmt.Errorf("failed to record migration %q in history table: %w", file.Filename, err)
+			dur := time.Since(start)
 			res.Failed = &MigrationResult{
-				File:     file,
-				Duration: time.Since(start),
-				Error:    migErr,
+				File:       file,
+				Duration:   dur,
+				DurationMs: dur.Milliseconds(),
+				Error:      migErr,
+				ErrMessage: migErr.Error(),
 			}
 			return res, migErr
 		}
@@ -176,18 +237,22 @@ func Apply(ctx context.Context, db TxBeginnerContext, tableName string, pending 
 		if err := tx.Commit(); err != nil {
 			_ = tx.Rollback()
 			migErr := fmt.Errorf("failed to commit transaction for migration %q: %w", file.Filename, err)
+			dur := time.Since(start)
 			res.Failed = &MigrationResult{
-				File:     file,
-				Duration: time.Since(start),
-				Error:    migErr,
+				File:       file,
+				Duration:   dur,
+				DurationMs: dur.Milliseconds(),
+				Error:      migErr,
+				ErrMessage: migErr.Error(),
 			}
 			return res, migErr
 		}
 
 		duration := time.Since(start)
 		res.Applied = append(res.Applied, &MigrationResult{
-			File:     file,
-			Duration: duration,
+			File:       file,
+			Duration:   duration,
+			DurationMs: duration.Milliseconds(),
 		})
 	}
 
@@ -230,8 +295,23 @@ func FormatResult(w io.Writer, res *Result) error {
 		if _, err := fmt.Fprintf(w, "  ✗ %s FAILED (%s)\n", res.Failed.File.Filename, durStr); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintf(w, "    Error: %v\n", res.Failed.Error); err != nil {
-			return err
+		if res.Failed.StatementIdx > 0 && res.Failed.LineNumber > 0 {
+			if _, err := fmt.Fprintf(w, "    Error at statement %d (line %d): %v\n", res.Failed.StatementIdx, res.Failed.LineNumber, res.Failed.Error); err != nil {
+				return err
+			}
+		} else {
+			if _, err := fmt.Fprintf(w, "    Error: %v\n", res.Failed.Error); err != nil {
+				return err
+			}
+		}
+		if res.Failed.StatementSQL != "" {
+			firstLine := strings.Split(res.Failed.StatementSQL, "\n")[0]
+			if len(firstLine) > 80 {
+				firstLine = firstLine[:77] + "..."
+			}
+			if _, err := fmt.Fprintf(w, "    Statement: %s\n", firstLine); err != nil {
+				return err
+			}
 		}
 		if _, err := fmt.Fprintf(w, "    Migration rolled back cleanly.\n"); err != nil {
 			return err
